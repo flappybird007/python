@@ -15,6 +15,7 @@ WINDOW_WIDTH = 1400
 WINDOW_HEIGHT = 900
 FPS = 60
 GRID_SIZE = 10
+SPAWN_SAFETY_RADIUS = 200  # Safe spawn distance
 
 # Colors
 BLACK = (10, 10, 10)
@@ -30,6 +31,7 @@ GRAY = (100, 100, 100)
 DARK_GRAY = (50, 50, 50)
 NEON_GREEN = (0, 255, 100)
 NEON_PINK = (255, 20, 147)
+BORDER_COLOR = (200, 50, 50)
 
 # AI Names Pool
 AI_NAMES = [
@@ -66,7 +68,7 @@ class Snake:
         self.next_direction = Point(1, 0)
         self.is_ai = is_ai
         self.name = name
-        self.speed = 5  # Slightly faster
+        self.speed = 5
         self.growth_pending = 0
         self.dead = False
         self.angle = 0  # For 360-degree movement
@@ -79,8 +81,12 @@ class Snake:
         if self.dead:
             return
             
-        # Update direction
-        self.direction = self.next_direction
+        # Update direction - IMPORTANT: only update if next_direction changed
+        if self.next_direction.x != 0 or self.next_direction.y != 0:
+            # Check that we're not doing a 180-degree turn
+            dot_product = self.direction.x * self.next_direction.x + self.direction.y * self.next_direction.y
+            if dot_product >= 0:  # Not a 180-degree turn
+                self.direction = self.next_direction
         
         # Calculate new head position
         head = self.body[0]
@@ -89,9 +95,9 @@ class Snake:
             head.y + self.direction.y * self.speed
         )
         
-        # Wrap around screen (infinite map)
-        new_head.x = new_head.x % WINDOW_WIDTH
-        new_head.y = new_head.y % WINDOW_HEIGHT
+        # CLAMP to map boundaries (NOT WRAPPING - BOUNDED MAP)
+        new_head.x = max(10, min(WINDOW_WIDTH - 10, new_head.x))
+        new_head.y = max(10, min(WINDOW_HEIGHT - 10, new_head.y))
         
         self.body.insert(0, new_head)
         
@@ -101,16 +107,15 @@ class Snake:
         else:
             self.body.pop()
     
-    def grow(self, amount: int = 2):  # Grow faster (was 1)
+    def grow(self, amount: int = 2):  # Grow faster
         self.growth_pending += amount
     
     def set_direction(self, dx: float, dy: float):
-        """Normalize direction for smooth movement"""
+        """Set direction only if it's significantly different"""
         length = math.sqrt(dx**2 + dy**2)
-        if length > 0:
-            # Prevent 180-degree turns
-            if (dx, dy) != (-self.direction.x, -self.direction.y):
-                self.next_direction = Point(dx / length, dy / length)
+        if length > 0.1:  # Only if movement is significant
+            # Normalize
+            self.next_direction = Point(dx / length, dy / length)
     
     def ai_update(self, food_points: List[Point], other_snakes: List['Snake']):
         if self.dead or not self.is_ai:
@@ -128,13 +133,13 @@ class Snake:
                 nearest_food = food
         
         # Find threats (other snake heads nearby)
-        threat_distance = 200  # Increased awareness
+        threat_distance = 200
         threats = []
         for snake in other_snakes:
             if snake != self and not snake.dead:
                 dist = head.distance_to(snake.body[0])
                 if dist < threat_distance:
-                    threats.append(snake.body[0])
+                    threats.append((snake.body[0], len(snake.body)))
         
         # AI Decision making - improved
         best_direction = self.direction
@@ -147,7 +152,8 @@ class Snake:
             dy = math.sin(rad)
             
             # Prevent reversing
-            if (dx, dy) == (-self.direction.x, -self.direction.y):
+            dot_product = self.direction.x * dx + self.direction.y * dy
+            if dot_product < 0.5:  # More lenient to allow U-turns in tight spaces
                 continue
             
             # Calculate test position
@@ -155,8 +161,10 @@ class Snake:
                 head.x + dx * self.speed * 25,
                 head.y + dy * self.speed * 25
             )
-            test_point.x = test_point.x % WINDOW_WIDTH
-            test_point.y = test_point.y % WINDOW_HEIGHT
+            
+            # Clamp to bounds
+            test_point.x = max(10, min(WINDOW_WIDTH - 10, test_point.x))
+            test_point.y = max(10, min(WINDOW_HEIGHT - 10, test_point.y))
             
             score = 0
             
@@ -165,10 +173,14 @@ class Snake:
                 food_dist = test_point.distance_to(nearest_food)
                 score += 150 - (food_dist / 8)
             
-            # Strong repulsion from threats
-            for threat in threats:
-                threat_dist = test_point.distance_to(threat)
-                score -= 300 / (threat_dist + 1)
+            # Strong repulsion from threats (especially larger ones)
+            for threat_pos, threat_length in threats:
+                threat_dist = test_point.distance_to(threat_pos)
+                # Only fear snakes that are longer
+                if threat_length > len(self.body):
+                    score -= 500 / (threat_dist + 1)
+                else:
+                    score -= 100 / (threat_dist + 1)
             
             # Bonus for not hitting own body
             collision = False
@@ -179,6 +191,18 @@ class Snake:
             
             if collision:
                 score -= 1000
+            
+            # Bonus for staying away from walls
+            wall_penalty = 0
+            if test_point.x < 50:
+                wall_penalty += 100
+            if test_point.x > WINDOW_WIDTH - 50:
+                wall_penalty += 100
+            if test_point.y < 50:
+                wall_penalty += 100
+            if test_point.y > WINDOW_HEIGHT - 50:
+                wall_penalty += 100
+            score -= wall_penalty
             
             if score > best_score:
                 best_score = score
@@ -191,8 +215,9 @@ class Snake:
     
     def check_self_collision(self) -> bool:
         head = self.get_head()
+        # Only check body segments that are at least 4 segments away
         for segment in self.body[4:]:
-            if head.distance_to(segment) < 12:
+            if head.distance_to(segment) < 10:
                 return True
         return False
     
@@ -209,11 +234,10 @@ class Snake:
         pygame.draw.circle(screen, self.head_color, (int(self.body[0].x), int(self.body[0].y)), 7)
         pygame.draw.circle(screen, WHITE, (int(self.body[0].x), int(self.body[0].y)), 7, 2)
         
-        # Draw name above head if AI
-        if self.is_ai:
-            font = pygame.font.Font(None, 18)
-            name_text = font.render(self.name, True, self.head_color)
-            screen.blit(name_text, (int(self.body[0].x) - 20, int(self.body[0].y) - 30))
+        # Draw name above head
+        font = pygame.font.Font(None, 18)
+        name_text = font.render(self.name, True, self.head_color)
+        screen.blit(name_text, (int(self.body[0].x) - 20, int(self.body[0].y) - 30))
 
 
 class SnakeGame:
@@ -238,9 +262,7 @@ class SnakeGame:
     def load_sounds(self):
         """Load sound effects"""
         self.sounds = {}
-        # Try to load sounds, but continue if they don't exist
         try:
-            # You can add sound files later
             pass
         except:
             pass
@@ -250,27 +272,48 @@ class SnakeGame:
         if sound_name in self.sounds:
             self.sounds[sound_name].play()
     
+    def is_safe_spawn_location(self, x: float, y: float, exclude_snake: 'Snake' = None) -> bool:
+        """Check if spawn location is safe (not too close to player)"""
+        if exclude_snake:
+            dist = exclude_snake.get_head().distance_to(Point(x, y))
+            return dist > SPAWN_SAFETY_RADIUS
+        return True
+    
     def reset_game(self):
         # Player snake with custom name and color
         self.player = Snake(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2, self.player_color, 
                            is_ai=False, name=self.player_name)
         
-        # AI snakes with random names
+        # AI snakes with random names - SAFE SPAWN
         self.ai_snakes = []
         ai_colors = [BLUE, ORANGE, CYAN, PURPLE, NEON_GREEN, NEON_PINK]
-        for i in range(4):  # More AI snakes
-            random_name = random.choice(AI_NAMES)
-            self.ai_snakes.append(
-                Snake(random.randint(100, WINDOW_WIDTH - 100),
-                      random.randint(100, WINDOW_HEIGHT - 100),
-                      ai_colors[i % len(ai_colors)], 
-                      is_ai=True, 
-                      name=random_name)
-            )
+        for i in range(4):  # 4 AI snakes
+            # Keep trying to find safe spawn location
+            safe_spawn = False
+            attempts = 0
+            while not safe_spawn and attempts < 10:
+                spawn_x = random.randint(100, WINDOW_WIDTH - 100)
+                spawn_y = random.randint(100, WINDOW_HEIGHT - 100)
+                if self.is_safe_spawn_location(spawn_x, spawn_y, self.player):
+                    safe_spawn = True
+                attempts += 1
+            
+            if safe_spawn:
+                random_name = random.choice(AI_NAMES)
+                self.ai_snakes.append(
+                    Snake(spawn_x, spawn_y,
+                          ai_colors[i % len(ai_colors)], 
+                          is_ai=True, 
+                          name=random_name)
+                )
         
         self.all_snakes = [self.player] + self.ai_snakes
         self.food_points = []
         self.spawn_food(30)  # More food on map
+        
+        # Default direction is right
+        self.player.direction = Point(1, 0)
+        self.player.next_direction = Point(1, 0)
         
         self.state = GameState.PLAYING
     
@@ -293,7 +336,7 @@ class SnakeGame:
             
             # Normalize
             length = math.sqrt(dx**2 + dy**2)
-            if length > 0:
+            if length > 5:  # Only update if mouse is far enough
                 self.player.set_direction(dx / length, dy / length)
     
     def handle_input(self):
@@ -368,21 +411,24 @@ class SnakeGame:
                             self.spawn_food(1)
                             self.play_sound('eat')
             
-            # Check snake collisions (only head-to-body, not head-to-head)
+            # Check snake collisions - CRITICAL FIX: Only head-to-body collisions
             for snake in self.all_snakes:
                 if not snake.dead:
                     head = snake.get_head()
                     
-                    # Check collision with other snakes' bodies
+                    # Check collision with other snakes' bodies ONLY
                     for other_snake in self.all_snakes:
                         if other_snake == snake or other_snake.dead:
                             continue
                         
-                        # Only die if hit another snake's BODY (not head)
-                        for i, segment in enumerate(other_snake.body):
-                            if i == 0:  # Skip head
-                                continue
-                            if head.distance_to(segment) < 12:
+                        # ONLY check body segments (skip index 0 which is head)
+                        # Start from index 1 to skip the head
+                        for i in range(1, len(other_snake.body)):
+                            segment = other_snake.body[i]
+                            collision_dist = head.distance_to(segment)
+                            
+                            # STRICT collision detection
+                            if collision_dist < 10:  # Stricter threshold
                                 snake.dead = True
                                 # Drop food where snake died
                                 for _ in range(len(snake.body) // 5):
@@ -392,8 +438,11 @@ class SnakeGame:
                                     ))
                                 self.play_sound('death')
                                 break
+                        
+                        if snake.dead:
+                            break
             
-            # Check self collision
+            # Check self collision - VERY STRICT
             for snake in self.all_snakes:
                 if not snake.dead and snake.check_self_collision():
                     snake.dead = True
@@ -404,7 +453,7 @@ class SnakeGame:
                 self.state = GameState.DEATH
     
     def draw_menu(self):
-        # Fancy gradient-like background
+        # Fancy background
         self.screen.fill(BLACK)
         
         # Draw decorative background pattern
@@ -424,7 +473,7 @@ class SnakeGame:
             "🖱️  MOVE MOUSE to control your snake",
             "🍕 Eat food (dots) to grow bigger",
             "⚔️  Avoid other snakes' bodies",
-            "💪 Only your HEAD matters - hit body = DEATH",
+            "💪 Your BODY doesn't hurt - only hitting bodies = DEATH",
             "🏆 Become the longest snake!",
             "",
             "PRESS SPACE TO START",
@@ -488,6 +537,9 @@ class SnakeGame:
             pygame.draw.line(self.screen, DARK_GRAY, (x, 0), (x, WINDOW_HEIGHT), 1)
         for y in range(0, WINDOW_HEIGHT, GRID_SIZE * 10):
             pygame.draw.line(self.screen, DARK_GRAY, (0, y), (WINDOW_WIDTH, y), 1)
+        
+        # Draw map border (BOUNDED MAP)
+        pygame.draw.rect(self.screen, BORDER_COLOR, (5, 5, WINDOW_WIDTH - 10, WINDOW_HEIGHT - 10), 3)
         
         # Draw food with glow effect
         for food in self.food_points:
