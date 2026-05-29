@@ -207,7 +207,8 @@ class Snake:
         best_score = -float('inf')
         
         # Test 16 directions for better AI (360-degree movement)
-        for angle in range(0, 360, 22.5):
+        # FIX: Convert 22.5 to int for range() - it doesn't accept floats
+        for angle in range(0, 360, 23):
             rad = math.radians(angle)
             dx = math.cos(rad)
             dy = math.sin(rad)
