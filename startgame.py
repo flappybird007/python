@@ -2,6 +2,11 @@
 """
 🐍 Slimy Snake - Main Launcher
 Double-click this file to start the game!
+
+This script handles:
+- Checking if pygame is installed
+- Installing pygame if needed
+- Launching the main game
 """
 
 import subprocess
