@@ -6,29 +6,22 @@ import json
 import webbrowser
 from enum import Enum
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import sys
 from pathlib import Path
 
 # ==================== INITIALISIERUNG ====================
-# Pygame initialisieren (Grafik- und Sound-Engine)
 pygame.init()
-# Sound-System initialisieren für Audioausgabe
 pygame.mixer.init()
 
 # ==================== KONSTANTEN ====================
-# Fenster-Dimensionen (Breite x Höhe in Pixeln) - können mit Fullscreen geändert werden
 WINDOW_WIDTH = 1400
 WINDOW_HEIGHT = 900
-# Frames Per Second - höhere Werte = flüssigeres Spiel (60 ist Standard)
 FPS = 60
-# Größe des Gitter-Hintergrunds (visuell, nicht spielmechanisch)
 GRID_SIZE = 10
-# Sicherheitsradius um Spieler beim Spawn
 SPAWN_SAFETY_RADIUS = 300
 
 # ==================== FARB-DEFINITIONEN ====================
-# RGB-Farben für verschiedene Spielelemente
 BLACK = (10, 10, 10)
 WHITE = (255, 255, 255)
 RED = (255, 50, 50)
@@ -45,8 +38,18 @@ NEON_PINK = (255, 20, 147)
 NEON_CYAN = (0, 255, 255)
 BORDER_COLOR = (255, 0, 0)
 DARK_RED = (139, 0, 0)
-DEEP_SPACE = (5, 5, 20)  # Deep space blue-black
+DEEP_SPACE = (5, 5, 20)
 NEON_BLUE = (0, 150, 255)
+
+# ====== OPTIMIZED AI DIRECTIONS - Precomputed at startup ======
+# FIX: Eliminates TypeError with float range()
+# 16 directions for perfect 360-degree coverage
+AI_DIRECTION_COUNT = 16
+AI_DIRECTIONS: List[Tuple[float, float]] = [
+    (math.cos(math.radians(i * 360 / AI_DIRECTION_COUNT)), 
+     math.sin(math.radians(i * 360 / AI_DIRECTION_COUNT)))
+    for i in range(AI_DIRECTION_COUNT)
+]
 
 # ==================== GAME STATES ====================
 class GameState(Enum):
@@ -67,10 +70,16 @@ class Point:
     def distance_to(self, other: 'Point') -> float:
         """Berechnet Entfernung zu anderem Point"""
         return math.sqrt((self.x - other.x)**2 + (self.y - other.y)**2)
+    
+    def distance_squared_to(self, other: 'Point') -> float:
+        """Optimized distance (no sqrt) for comparisons"""
+        return (self.x - other.x)**2 + (self.y - other.y)**2
 
 # ==================== PARTICLE-KLASSE ====================
 class Particle:
     """Visuelle Effekt-Partikel"""
+    __slots__ = ['x', 'y', 'dx', 'dy', 'lifetime', 'max_lifetime', 'color']
+    
     def __init__(self, x: float, y: float, dx: float, dy: float, lifetime: int, color: Tuple):
         self.x = x
         self.y = y
@@ -89,7 +98,6 @@ class Particle:
     def draw(self, screen: pygame.Surface):
         """Zeichnet Partikel auf Bildschirm"""
         if self.lifetime > 0:
-            alpha = int(255 * (self.lifetime / self.max_lifetime))
             size = max(1, int(5 * (self.lifetime / self.max_lifetime)))
             pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), size)
 
@@ -103,7 +111,6 @@ class Asteroid:
         self.color = NEON_CYAN
         self.rotation = random.uniform(0, 360)
         self.rotation_speed = random.uniform(-5, 5)
-        # Asteroiden driften langsam durch die Lobby
         self.vx = random.uniform(-0.5, 0.5)
         self.vy = random.uniform(-0.5, 0.5)
         self.destroyed = False
@@ -116,7 +123,6 @@ class Asteroid:
             self.y += self.vy
             self.rotation += self.rotation_speed
             
-            # Wraparound an den Grenzen
             if self.x < -50:
                 self.x = WINDOW_WIDTH + 50
             if self.x > WINDOW_WIDTH + 50:
@@ -129,7 +135,6 @@ class Asteroid:
     def draw(self, screen: pygame.Surface):
         """Zeichnet den Asteroiden mit Rotation"""
         if not self.destroyed:
-            # Zeichne mehrere Ringe für 3D-Effekt
             pygame.draw.circle(screen, NEON_CYAN, (int(self.x), int(self.y)), self.size)
             pygame.draw.circle(screen, DARK_GRAY, (int(self.x), int(self.y)), self.size, 2)
             pygame.draw.circle(screen, NEON_CYAN, (int(self.x), int(self.y)), int(self.size * 0.6), 1)
@@ -140,7 +145,6 @@ class Orb:
     def __init__(self, x: float, y: float, is_special: bool = False):
         self.x = x
         self.y = y
-        # Blaue normale Orbs, Lila für spezial Power-ups
         self.color = NEON_BLUE if not is_special else NEON_PINK
         self.is_special = is_special
         self.size = 8 if not is_special else 12
@@ -157,14 +161,10 @@ class Orb:
     def draw(self, screen: pygame.Surface):
         """Zeichnet die Orb mit Animation"""
         if not self.collected:
-            # Bobbing Animation
             bob_y = self.y + math.sin(self.bob_offset) * 5
-            
-            # Glowing Effekt
             pygame.draw.circle(screen, self.color, (int(self.x), int(bob_y)), self.size)
             pygame.draw.circle(screen, WHITE, (int(self.x), int(bob_y)), self.size, 1)
             
-            # Innerer Glanz
             if self.is_special:
                 pygame.draw.circle(screen, NEON_PINK, (int(self.x - 3), int(bob_y - 3)), 2)
 
@@ -182,12 +182,11 @@ class Snake:
         self.growth_pending = 0
         self.dead = False
         self.angle = 0
-        self.particles = []
+        self.particles: List[Particle] = []
         
-        # Power-up Effekte
         self.powered_up = False
         self.power_up_time = 0
-        self.power_up_duration = 15 * FPS  # 15 Sekunden
+        self.power_up_duration = 15 * FPS
         self.shield_color = NEON_PINK
     
     def _get_head_color(self, color: Tuple) -> Tuple:
@@ -206,11 +205,15 @@ class Snake:
             self.particles.append(particle)
     
     def update_particles(self):
-        """Aktualisiert Partikel"""
-        for particle in self.particles[:]:
+        """Aktualisiert Partikel - optimiert"""
+        dead_indices = []
+        for i, particle in enumerate(self.particles):
             particle.update()
             if particle.lifetime <= 0:
-                self.particles.remove(particle)
+                dead_indices.append(i)
+        
+        for i in reversed(dead_indices):
+            self.particles.pop(i)
     
     def update_power_up(self):
         """Aktualisiert Power-up Status"""
@@ -241,7 +244,6 @@ class Snake:
             head.y + self.direction.y * self.speed
         )
         
-        # Wall Bounce
         if new_head.x <= 10 or new_head.x >= WINDOW_WIDTH - 10:
             self.direction.x *= -1
             new_head.x = max(10, min(WINDOW_WIDTH - 10, new_head.x))
@@ -279,7 +281,7 @@ class Snake:
         """Überprüft Selbst-Kollision"""
         head = self.get_head()
         for segment in self.body[4:]:
-            if head.distance_to(segment) < 10:
+            if head.distance_squared_to(segment) < 100:  # 10^2
                 return True
         return False
     
@@ -288,12 +290,12 @@ class Snake:
         head = self.body[0]
         arrow_length = 20
         
-        tip_x = head.x + math.cos(self.angle * math.pi / 180) * arrow_length
-        tip_y = head.y + math.sin(self.angle * math.pi / 180) * arrow_length
+        angle_rad = self.angle * math.pi / 180
+        tip_x = head.x + math.cos(angle_rad) * arrow_length
+        tip_y = head.y + math.sin(angle_rad) * arrow_length
         
         pygame.draw.line(screen, self.head_color, (int(head.x), int(head.y)), (int(tip_x), int(tip_y)), 3)
         
-        angle_rad = self.angle * math.pi / 180
         for offset_angle in [-30, 30]:
             back_angle = angle_rad + (offset_angle + 180) * math.pi / 180
             back_x = tip_x + math.cos(back_angle) * 8
@@ -302,27 +304,22 @@ class Snake:
     
     def draw(self, screen: pygame.Surface):
         """Zeichnet die Snake"""
-        # Körper
         for i, segment in enumerate(self.body):
             brightness = max(0.4, 1 - i * 0.015)
             color = tuple(int(c * brightness) for c in self.color)
             pygame.draw.circle(screen, color, (int(segment.x), int(segment.y)), 6)
             pygame.draw.circle(screen, WHITE, (int(segment.x), int(segment.y)), 6, 1)
         
-        # Kopf
         pygame.draw.circle(screen, self.head_color, (int(self.body[0].x), int(self.body[0].y)), 8)
         pygame.draw.circle(screen, WHITE, (int(self.body[0].x), int(self.body[0].y)), 8, 2)
         
-        # Power-up Shield
         if self.powered_up:
             alpha = int(255 * (self.power_up_time / self.power_up_duration))
             shield_size = 12 + int(3 * math.sin(pygame.time.get_ticks() / 100))
             pygame.draw.circle(screen, self.shield_color, (int(self.body[0].x), int(self.body[0].y)), shield_size, 2)
         
-        # Richtungs-Pfeil
         self.draw_direction_arrow(screen)
         
-        # Name
         font = pygame.font.Font(None, 18)
         name_text = font.render(self.name, True, self.head_color)
         screen.blit(name_text, (int(self.body[0].x) - 20, int(self.body[0].y) - 35))
@@ -331,43 +328,36 @@ class Snake:
 class SnakeGame:
     """Hauptklasse die das ganze Spiel koordiniert"""
     def __init__(self):
-        # Fenster
         self.fullscreen = False
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        pygame.display.set_caption("🐍 SLIMY SNAKE - Next Generation")
+        pygame.display.set_caption("🎮 FLAPPY-SNAKE-IO - Battle Royale")
         self.clock = pygame.time.Clock()
         
-        # Schriften
         self.font_large = pygame.font.Font(None, 80)
         self.font_medium = pygame.font.Font(None, 45)
         self.font_small = pygame.font.Font(None, 28)
         self.font_tiny = pygame.font.Font(None, 20)
         
-        # Spiel-Status
         self.state = GameState.MENU
         self.player_name = "Player1"
         self.player_color = GREEN
         self.available_colors = [GREEN, BLUE, ORANGE, CYAN, PURPLE, NEON_GREEN, NEON_PINK, YELLOW]
         self.color_index = 0
         
-        # Sound und Musik
         self.music_loaded = False
         self.sounds = {}
         
-        # Spiel-Elemente
-        self.player = None
-        self.asteroids = []
-        self.orbs = []
-        self.particles = []
+        self.player: Optional[Snake] = None
+        self.asteroids: List[Asteroid] = []
+        self.orbs: List[Orb] = []
+        self.particles: List[Particle] = []
         
-        # Stats
         self.load_stats()
         self.load_sounds()
     
     def load_sounds(self):
         """Lädt Sound-Effekte und Musik"""
         try:
-            # Versuch Assets zu laden
             if os.path.exists('assets/eat.wav'):
                 self.sounds['eat'] = pygame.mixer.Sound('assets/eat.wav')
             if os.path.exists('assets/death.wav'):
@@ -377,7 +367,6 @@ class SnakeGame:
             if os.path.exists('assets/powerup.wav'):
                 self.sounds['powerup'] = pygame.mixer.Sound('assets/powerup.wav')
             
-            # Musik
             if os.path.exists('assets/lobby_music.mp3') or os.path.exists('assets/lobby_music.wav'):
                 music_file = 'assets/lobby_music.mp3' if os.path.exists('assets/lobby_music.mp3') else 'assets/lobby_music.wav'
                 pygame.mixer.music.load(music_file)
@@ -400,7 +389,7 @@ class SnakeGame:
     
     def load_stats(self):
         """Lädt Stats"""
-        self.stats_file = Path(os.path.expanduser("~")) / ".slimy_snake_stats.json"
+        self.stats_file = Path(os.path.expanduser("~")) / ".flappy_snake_io_stats.json"
         if self.stats_file.exists():
             try:
                 with open(self.stats_file, 'r') as f:
@@ -446,10 +435,8 @@ class SnakeGame:
         """Setzt Spiel zurück"""
         self.player = Snake(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2, self.player_color, name=self.player_name)
         
-        # Erstelle Asteroiden
         self.asteroids = []
         for _ in range(5):
-            # Spawn mit Sicherheitsabstand
             safe_spawn = False
             attempts = 0
             while not safe_spawn and attempts < 10:
@@ -464,13 +451,12 @@ class SnakeGame:
                 size = random.randint(10, 20)
                 self.asteroids.append(Asteroid(ax, ay, size))
         
-        # Erstelle normale Orbs
         self.orbs = []
         self.spawn_orbs(30)
         
-        # Erstelle Power-up Orbs (seltener)
         for _ in range(random.randint(1, 3)):
-            self.orbs.append(Orb(random.randint(100, WINDOW_WIDTH - 100), random.randint(100, WINDOW_HEIGHT - 100), is_special=True))
+            self.orbs.append(Orb(random.randint(100, WINDOW_WIDTH - 100), 
+                               random.randint(100, WINDOW_HEIGHT - 100), is_special=True))
         
         self.particles = []
         self.state = GameState.PLAYING
@@ -497,7 +483,7 @@ class SnakeGame:
             if length > 5:
                 self.player.set_direction(dx / length, dy / length)
     
-    def handle_input(self):
+    def handle_input(self) -> bool:
         """Handhabe Input"""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -509,10 +495,6 @@ class SnakeGame:
                         self.state = GameState.USERNAME_INPUT
                     elif event.key == pygame.K_s:
                         self.state = GameState.SETTINGS
-                    elif event.key == pygame.K_r:
-                        self.open_readme()
-                    elif event.key == pygame.K_i:
-                        self.open_anleitung()
                     elif event.key == pygame.K_q:
                         return False
                 
@@ -566,47 +548,30 @@ class SnakeGame:
         else:
             self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
     
-    def open_readme(self):
-        """Öffne README"""
-        readme_path = Path("README.md").absolute()
-        if readme_path.exists():
-            webbrowser.open(f'file://{readme_path}')
-    
-    def open_anleitung(self):
-        """Öffne Anleitung"""
-        anleitung_path = Path("ANLEITUNG.md").absolute()
-        if anleitung_path.exists():
-            webbrowser.open(f'file://{anleitung_path}')
-    
     def update(self):
         """Aktualisiere Spiel-Logik"""
         if self.state == GameState.PLAYING:
             self.handle_mouse_movement()
             
-            # Bewege Snake
             self.player.move()
             self.player.update_power_up()
             
-            # Update Asteroiden
             for asteroid in self.asteroids:
                 asteroid.update()
             
-            # Update Orbs
             for orb in self.orbs:
                 orb.update()
             
             # ========== ORBS ESSEN ==========
             head = self.player.get_head()
             for orb in self.orbs[:]:
-                if not orb.collected and head.distance_to(Point(orb.x, orb.y)) < 15:
+                if not orb.collected and head.distance_squared_to(Point(orb.x, orb.y)) < 225:  # 15^2
                     orb.collected = True
                     
                     if orb.is_special:
-                        # Power-up
                         self.player.activate_power_up()
                         self.play_sound('powerup')
                     else:
-                        # Normale Orb
                         self.player.grow(2)
                         self.play_sound('eat')
                     
@@ -615,13 +580,11 @@ class SnakeGame:
             
             # ========== ASTEROID KOLLISIONEN ==========
             for asteroid in self.asteroids:
-                if head.distance_to(Point(asteroid.x, asteroid.y)) < (asteroid.size + 8):
+                if head.distance_squared_to(Point(asteroid.x, asteroid.y)) < (asteroid.size + 8)**2:
                     if self.player.powered_up:
-                        # Asteroid zerstört
                         asteroid.destroyed = True
                         self.play_sound('asteroid')
                         
-                        # 45 Orbs droppen
                         for _ in range(45):
                             angle = random.uniform(0, 2 * math.pi)
                             dist = random.uniform(0, asteroid.size)
@@ -629,15 +592,12 @@ class SnakeGame:
                             orb_y = asteroid.y + math.sin(angle) * dist
                             self.orbs.append(Orb(orb_x, orb_y, is_special=False))
                     else:
-                        # Spieler stirbt
                         self.player.dead = True
                         self.save_stats(len(self.player.body))
                         self.state = GameState.DEATH
             
-            # Entferne zerstörte Asteroiden
             self.asteroids = [a for a in self.asteroids if not a.destroyed]
             
-            # Selbst-Kollision
             if self.player.check_self_collision():
                 self.player.dead = True
                 self.save_stats(len(self.player.body))
@@ -647,28 +607,22 @@ class SnakeGame:
         """Zeichne Hauptmenü"""
         self.screen.fill(DEEP_SPACE)
         
-        # Gitter-Hintergrund
         for x in range(0, WINDOW_WIDTH, 60):
             for y in range(0, WINDOW_HEIGHT, 60):
                 if (x // 60 + y // 60) % 2 == 0:
                     pygame.draw.rect(self.screen, (20, 20, 40), (x, y, 60, 60))
         
-        # Border
         pygame.draw.rect(self.screen, NEON_CYAN, (20, 20, WINDOW_WIDTH - 40, WINDOW_HEIGHT - 40), 5)
         
-        # Titel mit Glow-Effekt
-        title = self.font_large.render("🐍 SLIMY SNAKE", True, NEON_GREEN)
-        subtitle = self.font_medium.render("Next Generation", True, NEON_PINK)
+        title = self.font_large.render("🎮 FLAPPY-SNAKE-IO", True, NEON_GREEN)
+        subtitle = self.font_medium.render("Battle Royale Edition", True, NEON_PINK)
         
         self.screen.blit(title, (WINDOW_WIDTH // 2 - title.get_width() // 2, 50))
         self.screen.blit(subtitle, (WINDOW_WIDTH // 2 - subtitle.get_width() // 2, 150))
         
-        # Menü-Tasten
         menu_items = [
             ("PRESS SPACE TO START", 300),
             ("PRESS S FOR SETTINGS", 380),
-            ("PRESS R FOR README", 460),
-            ("PRESS I FOR ANLEITUNG", 540),
             ("PRESS Q TO QUIT", 700),
         ]
         
@@ -742,29 +696,23 @@ class SnakeGame:
         """Zeichne Spiel"""
         self.screen.fill(DEEP_SPACE)
         
-        # Gitter
         for x in range(0, WINDOW_WIDTH, GRID_SIZE * 10):
             pygame.draw.line(self.screen, (30, 30, 60), (x, 0), (x, WINDOW_HEIGHT), 1)
         for y in range(0, WINDOW_HEIGHT, GRID_SIZE * 10):
             pygame.draw.line(self.screen, (30, 30, 60), (0, y), (WINDOW_WIDTH, y), 1)
         
-        # Border
         pygame.draw.rect(self.screen, BORDER_COLOR, (5, 5, WINDOW_WIDTH - 10, WINDOW_HEIGHT - 10), 5)
         pygame.draw.rect(self.screen, DARK_RED, (3, 3, WINDOW_WIDTH - 6, WINDOW_HEIGHT - 6), 2)
         
-        # Asteroiden
         for asteroid in self.asteroids:
             asteroid.draw(self.screen)
         
-        # Orbs
         for orb in self.orbs:
             orb.draw(self.screen)
         
-        # Snake
         if not self.player.dead:
             self.player.draw(self.screen)
         
-        # HUD
         player_length = len(self.player.body)
         player_score = self.font_small.render(f"👤 {self.player_name}: {player_length}", True, self.player_color)
         self.screen.blit(player_score, (10, 10))
@@ -772,7 +720,6 @@ class SnakeGame:
         fps_text = self.font_tiny.render(f"FPS: {int(self.clock.get_fps())}", True, NEON_GREEN)
         self.screen.blit(fps_text, (10, 40))
         
-        # Power-up Timer
         if self.player.powered_up:
             timer_text = self.font_tiny.render(f"⚡ POWERED UP: {int(self.player.power_up_time / FPS)}s", True, NEON_PINK)
             self.screen.blit(timer_text, (10, 70))
@@ -810,7 +757,6 @@ class SnakeGame:
         score_text = self.font_medium.render(f"Final Length: {len(self.player.body)}", True, YELLOW)
         self.screen.blit(score_text, (WINDOW_WIDTH // 2 - score_text.get_width() // 2, 300))
         
-        # High Score Info
         if len(self.player.body) == self.stats["highest_score"]:
             record_text = self.font_small.render("🏆 NEW HIGH SCORE!", True, NEON_GREEN)
             self.screen.blit(record_text, (WINDOW_WIDTH // 2 - record_text.get_width() // 2, 400))
